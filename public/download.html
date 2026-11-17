@@ -65,7 +65,8 @@
             try {
                 downloadbtn.disabled = true;
                 setStatus("Starting download…", "ok");
-                window.location.href = DOWNLOAD_URL + roomId;
+                const params = new URLSearchParams(location.search);
+                const roomId = params.get("room");
             } catch (err) {
                 setStatus("Failed to download file: " + err, "err");
                 downloadbtn.disabled = false;
