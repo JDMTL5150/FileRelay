@@ -44,8 +44,11 @@
         import { DOWNLOAD_URL, STATUS_URL } from "/js/config.js";
 
         const $ = id => document.getElementById(id);
-        const roomId = location.pathname.split("/").filter(Boolean).pop();
-
+        
+        const params = new URLSearchParams(location.search);
+        const pathSegment = location.pathname.split("/").filter(Boolean).pop();
+        const roomId = params.get("room") || (pathSegment !== "download" && pathSegment !== "receive" ? pathSegment : null)
+        
         const statuslbl = $("statuslbl");
         const downloadbtn = $("downloadbtn");
 
