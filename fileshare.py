@@ -3,7 +3,6 @@ import os
 import queue
 import secrets
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -13,6 +12,8 @@ from pydantic import BaseModel
 from werkzeug.exceptions import HTTPException
 
 CHUNK_SIZE = 65536
+ROOM_TTL_SECONDS = 600  # 10-minute room expiration
+
 
 @dataclass
 class Room:
@@ -24,13 +25,14 @@ class Room:
     chunks: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=16))
     done: threading.Event = field(default_factory=threading.Event)
 
+
 # Server room tracker (requires single-process multi-threaded Gunicorn)
 room_tracker: dict[str, Room] = {}
 lock = threading.Lock()
 
 app = Flask(__name__, static_folder="public", static_url_path="")
 
-# Allow Cloudflare Pages frontend (set ALLOWED_ORIGINS env var on Render, or default to "*")
+# Allow Cloudflare frontend (set ALLOWED_ORIGINS env var on Render, or default to "*")
 allowed_origins = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
 CORS(app, resources={r"/*": {"origins": allowed_origins}})
 
@@ -93,6 +95,20 @@ def receive_upload() -> dict:
     return roomstat
 
 
+def stream(room: Room):
+    try:
+        while chunk := request.stream.read(CHUNK_SIZE):
+            if room.done.is_set():
+                abort(410)
+            room.chunks.put(chunk, timeout=30)
+        room.chunks.put(None)
+    except queue.Full:
+        abort(504)
+    except Exception as e:
+        print(str(e))
+        abort(410)
+
+
 @app.post("/send/<room_id>")
 def send_file_bytes(room_id: str) -> dict:
     valid = validate_room(room_id=room_id)
@@ -106,12 +122,6 @@ def send_file_bytes(room_id: str) -> dict:
         room.sender_connected = True
 
     try:
-        # Note: Render caps HTTP request duration at ~100s on free tier
-        deadline = time.monotonic() + 90
-        available = wait_for_receiver(room, deadline=deadline)
-        if not available:
-            abort(408)
-
         stream(room=room)
     except HTTPException:
         raise
@@ -120,31 +130,8 @@ def send_file_bytes(room_id: str) -> dict:
         abort(500)
     finally:
         room.sender_connected = False
-        remove_room(room_id)
 
     return {"success": True}
-
-
-def wait_for_receiver(room: Room, deadline: float) -> bool:
-    while not room.receiver_connected and not room.done.is_set():
-        if time.monotonic() > deadline:
-            return False
-        time.sleep(0.2)
-    return room.receiver_connected
-
-
-def stream(room: Room):
-    try:
-        while chunk := request.stream.read(CHUNK_SIZE):
-            if room.done.is_set():
-                abort(410)
-            room.chunks.put(chunk, timeout=30)
-        room.chunks.put(None)
-    except queue.Full:
-        abort(504)
-    except Exception as e:
-        print(str(e))
-        abort(410)
 
 
 @app.get("/receive/<room_id>")
@@ -165,7 +152,7 @@ def serve_download_status(room_id: str):
         room = room_tracker.get(room_id)
         if room is not None:
             age = (datetime.now(timezone.utc) - room.created_at).total_seconds()
-            if age > 600:  # 10-minute room expiration
+            if age > ROOM_TTL_SECONDS:
                 room_tracker.pop(room_id, None)
                 room.done.set()
                 room = None
@@ -182,29 +169,36 @@ def serve_download_status(room_id: str):
     return Response(data.model_dump_json(), mimetype="application/json")
 
 
-@app.post("/send/<room_id>")
-def send_file_bytes(room_id: str) -> dict:
+@app.get("/download/<room_id>")
+def serve_requested_file(room_id: str):
     valid = validate_room(room_id=room_id)
     if valid["code"] != 200:
         abort(valid["code"])
     room = valid["room"]
 
     with lock:
-        if room.sender_connected:
+        if room.receiver_connected:
             abort(409)
-        room.sender_connected = True
+        room.receiver_connected = True
 
-    try:
-        stream(room=room)
-    except HTTPException:
-        raise
-    except Exception as ex:
-        print(f"send failed: {ex}")
-        abort(500)
-    finally:
-        room.sender_connected = False
+    def stream_data():
+        try:
+            while True:
+                chunk = room.chunks.get(timeout=30)
+                if chunk is None:
+                    break
+                yield chunk
+        finally:
+            remove_room(room_id)
 
-    return {"success": True}
+    return Response(
+        stream_data(),
+        mimetype="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{room.filename}"',
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 if __name__ == "__main__":
