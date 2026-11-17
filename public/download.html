@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Downloader</title>
+    <style>
+        :root { --bg:#14161a; --card:#1d2025; --text:#e8eaed; --muted:#9aa0a9; --accent:#4f8cff; --border:#343841; --ok:#4ade80; --err:#f87171; --warning:#ffd900; }
+        * { box-sizing: border-box; }
+        body { margin: 0; background-color: var(--bg); font: 16px/1.5 system-ui, sans-serif; }
+        button { font:inherit; border:0; border-radius:8px; padding:.6rem 1rem; background:var(--accent); color:#fff; cursor:pointer; }
+        button:disabled { opacity:.5; cursor:not-allowed; }
+        .main {
+            min-width: 100vw;
+            min-height: 100vh;
+            background-color: var(--bg);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 1rem;
+        }
+        h2 { color: var(--text); margin: 0 0 10px 0; word-break: break-all; }
+        h5 { color: var(--muted); margin: 0; }
+        .card { width: 100%; max-width: 440px; background-color: var(--card); border: 1px solid var(--border); padding: 2.5rem; border-radius: 20px; display: flex; flex-direction: column; }
+        .spacer { min-height: 3rem; }
+        #statuslbl { margin: 1.5rem 0 0 0; padding: 0; color: var(--muted); font-size: .85rem; }
+        #statuslbl.ok { color: var(--ok); }
+        #statuslbl.err { color: var(--err); }
+    </style>
+</head>
+<body>
+    <div class="main">
+        <div class="card">
+            <h2 id="filename">Loading…</h2>
+            <h5 id="size"></h5>
+            <div class="spacer"></div>
+            <button id="downloadbtn" disabled>Download File</button>
+            <h6 id="statuslbl"></h6>
+        </div>
+    </div>
+
+    <script type="module">
+        import { DOWNLOAD_URL, STATUS_URL } from "/js/config.js";
+
+        const $ = id => document.getElementById(id);
+        const roomId = location.pathname.split("/").filter(Boolean).pop();
+
+        const statuslbl = $("statuslbl");
+        const downloadbtn = $("downloadbtn");
+
+        function setStatus(msg, _class = "") {
+            statuslbl.className = _class;
+            statuslbl.textContent = msg;
+        }
+
+        function fmt(n) {
+            if (n < 0) return "Unknown size";
+            const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+            while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+            return n.toFixed(i ? 1 : 0) + " " + u[i];
+        }
+
+        function downloadFile() {
+            try {
+                downloadbtn.disabled = true;
+                setStatus("Starting download…", "ok");
+                window.location.href = DOWNLOAD_URL + roomId;
+            } catch (err) {
+                setStatus("Failed to download file: " + err, "err");
+                downloadbtn.disabled = false;
+            }
+        }
+
+        document.addEventListener("DOMContentLoaded", async () => {
+            if (!roomId || roomId === "receive") {
+                $("filename").textContent = "Invalid Link";
+                setStatus("No room ID found in URL.", "err");
+                return;
+            }
+
+            setStatus("Fetching file details…");
+            try {
+                const metadata = await fetch(STATUS_URL + roomId, { method: "GET" });
+                if (!metadata.ok) {
+                    throw new Error(`HTTP ${metadata.status}`);
+                }
+
+                const meta_obj = await metadata.json();
+                if (!meta_obj || !meta_obj.success) {
+                    $("filename").textContent = "Room Expired or Not Found";
+                    setStatus("Could not reach document's metadata.", "err");
+                    downloadbtn.disabled = true;
+                    return;
+                }
+
+                $("filename").textContent = meta_obj.filename;
+                $("size").textContent = "Size: " + fmt(meta_obj.size);
+                downloadbtn.disabled = false;
+                setStatus("Download Ready.", "ok");
+            } catch (err) {
+                $("filename").textContent = "Unavailable";
+                setStatus("Failed to load document's content: " + err.message, "err");
+                downloadbtn.disabled = true;
+                return;
+            }
+
+            downloadbtn.onclick = () => downloadFile();
+        });
+    </script>
+</body>
+</html>

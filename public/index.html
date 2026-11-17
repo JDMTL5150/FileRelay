@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FileRelay</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c1f24; --muted:#6b7280; --accent:#2563eb; --border:#d8dce3; --ok:#16a34a; --err:#dc2626; --warning:#d97706; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --card:#1d2025; --text:#e8eaed; --muted:#9aa0a9; --accent:#4f8cff; --border:#343841; --ok:#4ade80; --err:#f87171; --warning:#ffd900; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, sans-serif; padding:1rem; }
+  .card { width:100%; max-width:480px; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:1.5rem; }
+  h1 { margin:0 0 1rem; font-size:1.25rem; }
+  #drop { border:2px dashed var(--border); border-radius:10px; padding:2rem 1rem; text-align:center; color:var(--muted); cursor:pointer; transition:border-color .15s; }
+  #drop.over { border-color:var(--accent); color:var(--text); }
+  #fileinfo { margin:.75rem 0 0; font-size:.9rem; color:var(--muted); word-break:break-all; }
+  button { font:inherit; border:0; border-radius:8px; padding:.6rem 1rem; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  #send { width:100%; margin-top:1rem; }
+  progress { width:100%; height:10px; margin-top:1rem; display:none; }
+  #status { margin:.75rem 0 0; font-size:.9rem; color:var(--muted); }
+  #status.ok { color:var(--ok); } #status.err { color:var(--err); } #status.warn { color:var(--warning); }
+  #linkbox { display:none; margin-top:1rem; gap:.5rem; }
+  #linkbox input { flex:1; min-width:0; padding:.5rem; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); font:inherit; font-size:.85rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Send a file</h1>
+
+  <div id="drop" tabindex="0">Drop a file here or click to choose</div>
+  <input id="picker" type="file" hidden>
+  <p id="fileinfo"></p>
+
+  <button id="send" disabled>Create link &amp; send</button>
+  <progress id="bar" max="100" value="0"></progress>
+  <p id="status"></p>
+
+  <div id="linkbox">
+    <input id="link" readonly>
+    <button id="copy">Copy</button>
+  </div>
+</div>
+
+<script type="module">
+  import { CREATE_URL, SEND_URL, RECEIVE_PATH } from "/js/config.js";
+
+  const $ = id => document.getElementById(id);
+  const drop = $("drop"), picker = $("picker"), sendBtn = $("send");
+  const bar = $("bar"), statusEl = $("status"), linkbox = $("linkbox"), link = $("link");
+  let file = null;
+
+  sendBtn.disabled = true;
+
+  function setStatus(msg, cls = "") { statusEl.textContent = msg; statusEl.className = cls; }
+  function fmt(n) {
+    const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return n.toFixed(i ? 1 : 0) + " " + u[i];
+  }
+
+  function choose(f) {
+    file = f;
+    $("fileinfo").textContent = f ? f.name + " (" + fmt(f.size) + ")" : "";
+    sendBtn.disabled = !f;
+    linkbox.style.display = "none";
+    bar.style.display = "none";
+    setStatus("");
+  }
+
+  drop.onclick = () => picker.click();
+  drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") picker.click(); };
+  picker.onchange = () => choose(picker.files[0]);
+  ["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", e => choose(e.dataTransfer.files[0]));
+
+  sendBtn.onclick = async () => {
+    if (!file) return;
+    sendBtn.disabled = true;
+    setStatus("Creating room (waking server if idle)…");
+
+    // Step 1: register the room (metadata only)
+    let room;
+    try {
+      const r = await fetch(CREATE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: file.name, size: file.size }),
+      });
+      room = await r.json();
+      if (!r.ok || !room.success) throw new Error(room.errmsg || "Could not create room");
+    } catch (err) {
+      setStatus("The fileshare server is not available at this time.", "warn");
+      sendBtn.disabled = false;
+      return;
+    }
+
+    // Show the Cloudflare frontend link right away
+    link.value = location.origin + RECEIVE_PATH + room.room_id;
+    linkbox.style.display = "flex";
+    setStatus("Share the link. Upload starts flowing once your friend connects.");
+
+    // Step 2: stream the raw file bytes to Render
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", SEND_URL + room.room_id);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    bar.style.display = "block";
+    bar.value = 0;
+
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) {
+        bar.value = (e.loaded / e.total) * 100;
+        setStatus("Sending… " + fmt(e.loaded) + " / " + fmt(e.total));
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status === 200) {
+        bar.value = 100;
+        setStatus("Done. Transfer complete.", "ok");
+      } else {
+        setStatus("Transfer failed (" + xhr.status + ").", "err");
+      }
+      sendBtn.disabled = false;
+    };
+    xhr.onerror = () => {
+      setStatus("Connection lost.", "err");
+      sendBtn.disabled = false;
+    };
+    xhr.send(file);
+  };
+
+  $("copy").onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(link.value);
+      $("copy").textContent = "Copied";
+    } catch {
+      link.select();
+    }
+    setTimeout(() => $("copy").textContent = "Copy", 1500);
+  };
+</script>
+</body>
+</html>
