@@ -156,54 +156,55 @@ class DownloadStatusObj(BaseModel):
     success: bool
     filename: str
     size: int
+    receiver_connected: bool = False
 
 
 @app.get("/status/<room_id>")
 def serve_download_status(room_id: str):
     with lock:
         room = room_tracker.get(room_id)
+        if room is not None:
+            age = (datetime.now(timezone.utc) - room.created_at).total_seconds()
+            if age > 600:  # 10-minute room expiration
+                room_tracker.pop(room_id, None)
+                room.done.set()
+                room = None
 
     if room is None:
-        data = DownloadStatusObj(success=False, filename="", size=-1)
+        data = DownloadStatusObj(success=False, filename="", size=-1, receiver_connected=False)
     else:
         data = DownloadStatusObj(
             success=True,
             filename=room.filename,
             size=room.size if room.size is not None else -1,
+            receiver_connected=room.receiver_connected,
         )
     return Response(data.model_dump_json(), mimetype="application/json")
 
 
-@app.get("/download/<room_id>")
-def serve_requested_file(room_id: str):
+@app.post("/send/<room_id>")
+def send_file_bytes(room_id: str) -> dict:
     valid = validate_room(room_id=room_id)
     if valid["code"] != 200:
         abort(valid["code"])
     room = valid["room"]
 
     with lock:
-        if room.receiver_connected:
+        if room.sender_connected:
             abort(409)
-        room.receiver_connected = True
+        room.sender_connected = True
 
-    def stream_data():
-        try:
-            while True:
-                chunk = room.chunks.get(timeout=30)
-                if chunk is None:
-                    break
-                yield chunk
-        finally:
-            remove_room(room_id)
+    try:
+        stream(room=room)
+    except HTTPException:
+        raise
+    except Exception as ex:
+        print(f"send failed: {ex}")
+        abort(500)
+    finally:
+        room.sender_connected = False
 
-    return Response(
-        stream_data(),
-        mimetype="application/octet-stream",
-        headers={
-            "Content-Disposition": f'attachment; filename="{room.filename}"',
-            "X-Accel-Buffering": "no",  # Prevents reverse proxies from buffering the live stream
-        },
-    )
+    return {"success": True}
 
 
 if __name__ == "__main__":

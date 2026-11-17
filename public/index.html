@@ -45,7 +45,7 @@
 </div>
 
 <script type="module">
-  import { CREATE_URL, SEND_URL, RECEIVE_PATH } from "/js/config.js";
+  import { CREATE_URL, SEND_URL, STATUS_URL, RECEIVE_PATH } from "/js/config.js";
 
   const $ = id => document.getElementById(id);
   const drop = $("drop"), picker = $("picker"), sendBtn = $("send");
@@ -101,9 +101,34 @@
     // Show the Cloudflare frontend link right away
     link.value = location.origin + RECEIVE_PATH + room.room_id;
     linkbox.style.display = "flex";
-    setStatus("Share the link. Upload starts flowing once your friend connects.");
+    setStatus("Waiting for receiver to click Download…");
 
-    // Step 2: stream the raw file bytes to Render
+    // Step 2: Poll /status until the receiver clicks Download File
+    const ready = await new Promise(resolve => {
+      const timer = setInterval(async () => {
+        try {
+          const res = await fetch(STATUS_URL + room.room_id);
+          const data = await res.json();
+          if (!data.success) {
+            clearInterval(timer);
+            resolve(false);
+          } else if (data.receiver_connected) {
+            clearInterval(timer);
+            resolve(true);
+          }
+        } catch {
+          // Ignore transient network blips while polling
+        }
+      }, 1500);
+    });
+
+    if (!ready) {
+      setStatus("Room expired before receiver connected.", "err");
+      sendBtn.disabled = false;
+      return;
+    }
+
+    // Step 3: Receiver is connected and waiting on /download — stream bytes now!
     const xhr = new XMLHttpRequest();
     xhr.open("POST", SEND_URL + room.room_id);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
